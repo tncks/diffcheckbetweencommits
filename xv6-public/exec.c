@@ -2,6 +2,7 @@
 #include "param.h"
 #include "memlayout.h"
 #include "mmu.h"
+#include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
 #include "x86.h"
@@ -11,13 +12,62 @@ int
 exec(char *path, char **argv)
 {
   char *s, *last;
-  int i, off;
+  int i, off, alive;
   uint argc, sz, sp, ustack[3+MAXARG+1];
   struct elfhdr elf;
   struct inode *ip;
   struct proghdr ph;
   pde_t *pgdir, *oldpgdir;
   struct proc *curproc = myproc();
+  struct proc *p;
+
+  
+  // Kill all other threads in the process
+  acquire(&ptable.lock);
+
+  if(curproc->killed){
+    release(&ptable.lock);
+    return -1;
+  }
+
+  if(curproc != curproc->process){
+    curproc->threadcount = curproc->process->threadcount;
+    curproc->process->threadcount = 0;
+    curproc->process->pid = curproc->pid;
+    curproc->pid = curproc->tgid;
+    curproc->process = curproc;
+  }
+
+  for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+    if (p->tgid == curproc->tgid && p->pid != curproc->pid) {
+      p->killed = 1;
+      p->process = curproc;
+      if (p->state == SLEEPING) 
+        p->state = RUNNABLE;
+    }
+  }
+  release(&ptable.lock);
+
+  // Wait for them to die
+  acquire(&ptable.lock);
+  for (;;) {
+    alive = 0;
+    for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+      // assumption: wait() will clear PID, TID
+      if (p->tgid == curproc->tgid && p != curproc 
+                                   && p->state != ZOMBIE) {
+        alive = 1;
+	break;
+      }
+    }
+    if (alive) {
+      sleep(curproc->process, &ptable.lock);
+    }
+    else {
+      break;
+    }
+  }
+  release(&ptable.lock);
 
   begin_op();
 
@@ -93,10 +143,16 @@ exec(char *path, char **argv)
       last = s+1;
   safestrcpy(curproc->name, last, sizeof(curproc->name));
 
+  initlock(&curproc->vlock, "valock");
+
   // Commit to the user image.
+
+  acquire(&curproc->vlock);
   oldpgdir = curproc->pgdir;
   curproc->pgdir = pgdir;
   curproc->sz = sz;
+  release(&curproc->vlock);
+
   curproc->tf->eip = elf.entry;  // main
   curproc->tf->esp = sp;
   switchuvm(curproc);

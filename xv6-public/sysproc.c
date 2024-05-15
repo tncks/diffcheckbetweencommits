@@ -5,12 +5,48 @@
 #include "param.h"
 #include "memlayout.h"
 #include "mmu.h"
+#include "spinlock.h"
 #include "proc.h"
 
 int
 sys_fork(void)
 {
   return fork();
+}
+
+int
+sys_clone(void)
+{
+  int (*fn)(void *, void*);
+  void *arg1;
+  void *arg2;
+  void *stack;
+  int flags;
+
+  if (argptr(0, (char **)&fn, 0) < 0)
+    return -1;
+  if (argptr(1, (char **)&arg1, 0) < 0)
+    return -1;
+  if (argptr(2, (char **)&arg2, 0) < 0)
+    return -1;
+  if (argint(3, (int *)&stack) < 0)
+    return -1;
+  if (argint(4, &flags) < 0)
+    return -1;
+  if (((uint)stack) > KERNBASE || ((uint)(stack - 4096)) >= KERNBASE) // passing bad stack
+    return -1;
+
+  return clone(fn, arg1, arg2, stack, flags);
+}
+
+int 
+sys_join(void)
+{
+  int pid;
+  if (argint(0, (int *)&pid) < 0)
+    return -1; 
+
+  return join(pid);
 }
 
 int
@@ -39,7 +75,7 @@ sys_kill(void)
 int
 sys_getpid(void)
 {
-  return myproc()->pid;
+  return myproc()->tgid;
 }
 
 int
@@ -50,7 +86,7 @@ sys_sbrk(void)
 
   if(argint(0, &n) < 0)
     return -1;
-  addr = myproc()->sz;
+  addr = myproc()->process->sz;
   if(growproc(n) < 0)
     return -1;
   return addr;
